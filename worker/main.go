@@ -8,18 +8,34 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gocarina/gocsv"
+	"github.com/joho/godotenv"
 	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/xuri/excelize/v2"
 )
 
 const rabbitMQURL = "amqp://guest:guest@127.0.0.1:5672/"
 const queueName = "upload_processamento_fila"
+var storagePath string
+
+func init() {
+	err := godotenv.Load()
+	if err != nil {
+		log.Printf("Error loading .env file: %v", err)
+	}
+
+	storagePath = os.Getenv("STORAGE_PATH")
+	if storagePath == "" {
+		storagePath = "C:/Users/edson/Documents/faculdade/lottus-uploader/uploads_temp"
+	}
+}
+
 const numWorkers = 5
 
 const maxCategoriaWorkers = 140
@@ -31,10 +47,10 @@ const maxAlunoWorkers = 140
 const javaLivroEndpoint = "http://localhost:8080/livros"
 const javaCategoriaEndpoint = "http://localhost:8080/categorias/obter-ou-criar"
 const javaAlunoEndpoint = "http://localhost:8080/alunos/cadastrar"
-const javaTurmaEndpoint = "http://localhost:8080/turmas"
+const javaTurmaEndpoint = "http://localhost:8080/turmas/obter-ou-criar"
 
 type JobPayload struct {
-	FilePath   string `json:"file_path"`
+	FilePath   string `json:"filePath"`
 	Finalidade string `json:"finalidade"`
 	Token      string `json:"token"`
 }
@@ -69,8 +85,6 @@ type Turma struct {
 
 var httpClient = http.Client{Timeout: 30 * time.Second}
 
-// --- Funções Genéricas de Postagem (Auxiliares) ---
-
 func postRequest(url, token string, payload interface{}) ([]byte, int, error) {
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
@@ -97,7 +111,7 @@ func postRequest(url, token string, payload interface{}) ([]byte, int, error) {
 // --- Lógica para Turmas (Alunos) ---
 
 func postTurma(nomeTurma, token string) (int, error) {
-	payload := map[string]string{"serie": nomeTurma}
+	payload := map[string]string{"nome": nomeTurma}
 	body, status, err := postRequest(javaTurmaEndpoint, token, payload)
 
 	if err != nil {
@@ -261,40 +275,74 @@ func processarAlunos(filePath, token string) (int, []string) {
 
 func lerAlunosXLSX(filePath string) ([]Aluno, error) {
 	f, err := excelize.OpenFile(filePath)
+
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
 
 	sheetName := f.GetSheetName(0)
-	rows, err := f.GetRows(sheetName)
+	rows, err := f.Rows(sheetName)
 	if err != nil {
 		return nil, err
 	}
 
-	if len(rows) < 2 {
-		return nil, fmt.Errorf("arquivo XLSX vazio ou sem cabeçalho")
+	var header []string
+	for rows.Next() {
+		header, err = rows.Columns()
+		if err != nil {
+			log.Printf("Aviso: Erro ao ler uma linha durante a busca pelo cabeçalho: %v", err)
+			continue
+		}
+		if len(header) > 0 {
+			break // Found a non-empty row, assume it's the header
+		}
 	}
 
-	header := rows[0]
+	if len(header) == 0 {
+		return nil, fmt.Errorf("nenhum cabeçalho com dados encontrado no arquivo XLSX")
+	}
+
 	colMap := map[string]int{}
 	for i, col := range header {
-		colMap[strings.TrimSpace(col)] = i
+		colMap[strings.ToLower(strings.TrimSpace(col))] = i
 	}
 
 	requiredCols := map[string]string{"Aluno": "Nome", "Turma": "TurmaNome"}
 	for reqCol := range requiredCols {
-		if _, ok := colMap[reqCol]; !ok {
+		if _, ok := colMap[strings.ToLower(reqCol)]; !ok {
 			return nil, fmt.Errorf("coluna obrigatória ausente: %s", reqCol)
 		}
 	}
 
+	var maxIndex int
+	for reqCol := range requiredCols {
+		idx := colMap[strings.ToLower(reqCol)]
+		if idx > maxIndex {
+			maxIndex = idx
+		}
+	}
+
 	var alunos []Aluno
-	for i := 1; i < len(rows); i++ {
-		row := rows[i]
+	for rows.Next() {
+		row, err := rows.Columns()
+		if err != nil {
+			log.Printf("Aviso: Erro ao ler linha: %v", err)
+			continue
+		}
+
+		if len(row) == 0 { // Pula linhas completamente vazias
+			continue
+		}
+
+		if len(row) <= maxIndex {
+			log.Printf("Aviso: Linha de aluno com número de colunas incorreto. Esperado >%d, obteve %d. Pulando linha: %v", maxIndex, len(row), row)
+			continue
+		}
+
 		aluno := Aluno{
-			Nome:      row[colMap["Aluno"]],
-			TurmaNome: row[colMap["Turma"]],
+			Nome:      row[colMap[strings.ToLower("Aluno")]],
+			TurmaNome: row[colMap[strings.ToLower("Turma")]],
 		}
 		alunos = append(alunos, aluno)
 	}
@@ -382,6 +430,7 @@ func postLivro(livro Livro, token string) error {
 	}
 
 	body, status, err := postRequest(javaLivroEndpoint, token, payload)
+	log.Printf("payload recebido: %s", payload)
 
 	if err != nil {
 		return err
@@ -490,50 +539,95 @@ func lerLivrosXLSX(filePath string) ([]Livro, error) {
 	defer f.Close()
 
 	sheetName := f.GetSheetName(0)
-	rows, err := f.GetRows(sheetName)
+	rows, err := f.Rows(sheetName)
 	if err != nil {
 		return nil, err
 	}
 
-	if len(rows) < 2 {
-		return nil, fmt.Errorf("arquivo XLSX vazio ou sem cabeçalho")
+	var header []string
+	for rows.Next() {
+		header, err = rows.Columns()
+		if err != nil {
+			log.Printf("Aviso: Erro ao ler uma linha durante a busca pelo cabeçalho: %v", err)
+			continue
+		}
+		if len(header) > 0 {
+			break // Found a non-empty row, assume it's the header
+		}
 	}
 
-	header := rows[0]
+	if len(header) == 0 {
+		return nil, fmt.Errorf("nenhum cabeçalho com dados encontrado no arquivo XLSX")
+	}
+	log.Printf("DEBUG: Cabeçalho lido do arquivo: %v", header)
+
 	colMap := map[string]int{}
 	for i, col := range header {
-		colMap[strings.TrimSpace(col)] = i
+		colMap[strings.ToLower(strings.TrimSpace(col))] = i
+	}
+	log.Printf("DEBUG: Mapa de colunas normalizado: %v", colMap)
+
+	// Mapa para armazenar o índice da coluna encontrada
+	foundColIndex := make(map[string]int)
+
+	// Mapa de colunas obrigatórias e suas alternativas
+	requiredColsAlternatives := map[string][]string{
+		"Título":       {"Título", "Titulo"},
+		"Autor/Autora": {"Autor/Autora"},
+		"Categoria":    {"Categoria"},
+		"Quantidade":   {"Quantidade"},
 	}
 
-	requiredCols := map[string]string{
-		"Título":       "Nome",
-		"Autor/Autora": "Autor",
-		"Categoria":    "CategoriaNome",
-		"Quantidade":   "Quantidade",
+	for canonicalName, alternatives := range requiredColsAlternatives {
+		found := false
+		for _, alt := range alternatives {
+			if idx, ok := colMap[strings.ToLower(alt)]; ok {
+				foundColIndex[canonicalName] = idx
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, fmt.Errorf("coluna obrigatória ausente: %s", canonicalName)
+		}
 	}
 
-	for reqCol := range requiredCols {
-		if _, ok := colMap[reqCol]; !ok {
-			return nil, fmt.Errorf("coluna obrigatória ausente: %s", reqCol)
+	var maxIndex int
+	for _, idx := range foundColIndex {
+		if idx > maxIndex {
+			maxIndex = idx
 		}
 	}
 
 	var livros []Livro
-	for i := 1; i < len(rows); i++ {
-		row := rows[i]
+	for rows.Next() {
+		row, err := rows.Columns()
+		if err != nil {
+			log.Printf("Aviso: Erro ao ler linha: %v", err)
+			continue
+		}
 
-		quantidadeStr := row[colMap["Quantidade"]]
+		if len(row) == 0 { // Pula linhas completamente vazias
+			continue
+		}
+
+		if len(row) <= maxIndex {
+			log.Printf("Aviso: Linha de livro com número de colunas incorreto. Esperado >%d, obteve %d. Pulando linha: %v", maxIndex, len(row), row)
+			continue
+		}
+
+		quantidadeStr := row[foundColIndex["Quantidade"]]
 		q, err := strconv.Atoi(quantidadeStr)
 
 		if err != nil {
-			log.Printf("Aviso: Quantidade inválida '%s' na linha %d: %v", quantidadeStr, i+1, err)
+			log.Printf("Aviso: Quantidade inválida '%s': %v", quantidadeStr, err)
 			continue
 		}
 
 		livro := Livro{
-			Nome:          row[colMap["Título"]],
-			Autor:         row[colMap["Autor/Autora"]],
-			CategoriaNome: row[colMap["Categoria"]],
+			Nome:          row[foundColIndex["Título"]],
+			Autor:         row[foundColIndex["Autor/Autora"]],
+			CategoriaNome: row[foundColIndex["Categoria"]],
 			Quantidade:    q,
 		}
 		livros = append(livros, livro)
@@ -544,11 +638,13 @@ func lerLivrosXLSX(filePath string) ([]Livro, error) {
 // --- Lógica Principal do Worker ---
 
 func processarArquivo(job JobPayload) (int, []string) {
+	fullPath := filepath.Join(storagePath, job.FilePath)
+
 	switch job.Finalidade {
 	case "livros":
-		return processarLivros(job.FilePath, job.Token)
+		return processarLivros(fullPath, job.Token)
 	case "alunos":
-		return processarAlunos(job.FilePath, job.Token)
+		return processarAlunos(fullPath, job.Token)
 	default:
 		return 0, []string{fmt.Sprintf("Finalidade '%s' não implementada.", job.Finalidade)}
 	}
@@ -573,11 +669,12 @@ func worker(deliveries <-chan amqp.Delivery, workerID int) {
 			d.Ack(false) // Confirma o recebimento e processamento
 		} else {
 			log.Printf("Worker %d: Job para %s falhou. %d sucessos e %d erros. Erros: %v", workerID, job.FilePath, sucesso, len(erros), erros)
-			d.Reject(false) // Descarta a mensagem para não bloquear a fila
+			d.Reject(false)
 		}
 
-		// Tenta remover o arquivo após o processamento
-		if err := os.Remove(job.FilePath); err != nil {
+		// Deleta o arquivo temporário
+		fullPathToRemove := filepath.Join(storagePath, job.FilePath)
+		if err := os.Remove(fullPathToRemove); err != nil {
 			log.Printf("Worker %d: Aviso: Não foi possível remover o arquivo temp: %v", workerID, err)
 		}
 	}
