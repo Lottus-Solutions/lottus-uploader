@@ -15,26 +15,13 @@ import (
 	"time"
 
 	"github.com/gocarina/gocsv"
-	"github.com/joho/godotenv"
 	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/xuri/excelize/v2"
 )
 
 const rabbitMQURL = "amqp://guest:guest@127.0.0.1:5672/"
 const queueName = "upload_processamento_fila"
-var storagePath string
-
-func init() {
-	err := godotenv.Load()
-	if err != nil {
-		log.Printf("Error loading .env file: %v", err)
-	}
-
-	storagePath = os.Getenv("STORAGE_PATH")
-	if storagePath == "" {
-		storagePath = "C:/Users/edson/Documents/faculdade/lottus-uploader/uploads_temp"
-	}
-}
+const storagePath = "C:/Users/edson/Documents/faculdade/library/uploads_temp"
 
 const numWorkers = 5
 
@@ -302,22 +289,39 @@ func lerAlunosXLSX(filePath string) ([]Aluno, error) {
 	if len(header) == 0 {
 		return nil, fmt.Errorf("nenhum cabeçalho com dados encontrado no arquivo XLSX")
 	}
+	log.Printf("DEBUG: Cabeçalho lido do arquivo de alunos: %v", header)
 
 	colMap := map[string]int{}
 	for i, col := range header {
 		colMap[strings.ToLower(strings.TrimSpace(col))] = i
 	}
+	log.Printf("DEBUG: Mapa de colunas de alunos normalizado: %v", colMap)
 
-	requiredCols := map[string]string{"Aluno": "Nome", "Turma": "TurmaNome"}
-	for reqCol := range requiredCols {
-		if _, ok := colMap[strings.ToLower(reqCol)]; !ok {
-			return nil, fmt.Errorf("coluna obrigatória ausente: %s", reqCol)
+	// Mapa para armazenar o índice da coluna encontrada
+	foundColIndex := make(map[string]int)
+
+	// Mapa de colunas obrigatórias e suas alternativas
+	requiredColsAlternatives := map[string][]string{
+		"Aluno": {"Aluno", "Nome"},
+		"Turma": {"Turma", "Classe", "Turmas"},
+	}
+
+	for canonicalName, alternatives := range requiredColsAlternatives {
+		found := false
+		for _, alt := range alternatives {
+			if idx, ok := colMap[strings.ToLower(alt)]; ok {
+				foundColIndex[canonicalName] = idx
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, fmt.Errorf("coluna obrigatória ausente: %s", canonicalName)
 		}
 	}
 
 	var maxIndex int
-	for reqCol := range requiredCols {
-		idx := colMap[strings.ToLower(reqCol)]
+	for _, idx := range foundColIndex {
 		if idx > maxIndex {
 			maxIndex = idx
 		}
@@ -341,8 +345,8 @@ func lerAlunosXLSX(filePath string) ([]Aluno, error) {
 		}
 
 		aluno := Aluno{
-			Nome:      row[colMap[strings.ToLower("Aluno")]],
-			TurmaNome: row[colMap[strings.ToLower("Turma")]],
+			Nome:      row[foundColIndex["Aluno"]],
+			TurmaNome: row[foundColIndex["Turma"]],
 		}
 		alunos = append(alunos, aluno)
 	}
