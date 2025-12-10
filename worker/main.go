@@ -31,10 +31,10 @@ const maxLivroWorkers = 25
 const maxTurmaWorkers = 140
 const maxAlunoWorkers = 140
 
-const javaLivroEndpoint = "http://localhost:8080/livros"
-const javaCategoriaEndpoint = "http://localhost:8080/categorias/obter-ou-criar"
-const javaAlunoEndpoint = "http://localhost:8080/alunos/cadastrar"
-const javaTurmaEndpoint = "http://localhost:8080/turmas/obter-ou-criar"
+const javaLivroEndpoint = "http://localhost:8080/api/batch/livros"
+const javaCategoriaEndpoint = "http://localhost:8080/api/categorias/obter-ou-criar"
+const javaAlunoEndpoint = "http://localhost:8080/api/batch/alunos"
+const javaTurmaEndpoint = "http://localhost:8080/api/turmas/obter-ou-criar"
 
 type JobPayload struct {
 	FilePath   string `json:"filePath"`
@@ -162,55 +162,43 @@ func enviarTurmas(turmasUnicas []string, token string) map[string]int {
 }
 
 func enviarListaAlunos(alunos []Aluno, token string) (int, []string) {
-	const maxWorkers = maxAlunoWorkers
+	const chunkSize = 1000
+	totalSucessos := 0
+	var todosErros []string
 
-	jobs := make(chan Aluno, len(alunos))
-	results := make(chan error, len(alunos))
+	for i := 0; i < len(alunos); i += chunkSize {
+		end := i + chunkSize
+		if end > len(alunos) {
+			end = len(alunos)
+		}
 
-	var wg sync.WaitGroup
+		batch := alunos[i:end]
 
-	for w := 1; w <= maxWorkers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for aluno := range jobs {
-				payload := map[string]interface{}{
-					"nome":           aluno.Nome,
-					"qtdBonus":       aluno.QtdBonus,
-					"qtdLivrosLidos": aluno.QtdLivrosLidos,
-					"turmaId":        aluno.TurmaID,
-				}
-				body, status, err := postRequest(javaAlunoEndpoint, token, payload)
-				if err != nil {
-					results <- fmt.Errorf("Aluno '%s' (Turma: %s) falhou: Erro de rede: %v", aluno.Nome, aluno.TurmaNome, err)
-				} else if status != http.StatusCreated && status != http.StatusOK {
-					results <- fmt.Errorf("Aluno '%s' (Turma: %s) falhou: Status: %d, Resposta: %s", aluno.Nome, aluno.TurmaNome, status, string(body))
-				} else {
-					results <- nil // Sucesso
-				}
+		var payload []map[string]interface{}
+		for _, aluno := range batch {
+			p := map[string]interface{}{
+				"nome":           aluno.Nome,
+				"qtdBonus":       aluno.QtdBonus,
+				"qtdLivrosLidos": aluno.QtdLivrosLidos,
+				"turmaId":        aluno.TurmaID,
 			}
-		}()
-	}
+			payload = append(payload, p)
+		}
+		body, status, err := postRequest(javaAlunoEndpoint, token, payload)
 
-	for _, aluno := range alunos {
-		jobs <- aluno
-	}
-	close(jobs)
-
-	wg.Wait()
-	close(results)
-
-	sucessos := 0
-	errosSlice := []string{}
-	for err := range results {
 		if err != nil {
-			errosSlice = append(errosSlice, err.Error())
+			todosErros = append(todosErros, fmt.Sprintf("Erro de rede no lote %d-%d: %v", i, end, err))
+			continue
+		}
+
+		if status != http.StatusCreated && status != http.StatusOK {
+			todosErros = append(todosErros, fmt.Sprintf("Erro no backend lote %d-%d: Status %d, Resposta: %s", i, end, status, string(body)))
 		} else {
-			sucessos++
+			totalSucessos++
 		}
 	}
 
-	return sucessos, errosSlice
+	return totalSucessos, todosErros
 }
 
 func processarAlunos(filePath, token string) (int, []string) {
@@ -448,45 +436,45 @@ func postLivro(livro Livro, token string) error {
 }
 
 func enviarListaLivros(livros []Livro, token string) (int, []string) {
-	const maxWorkers = maxLivroWorkers
+	const chunkSize = 1000
+	totalSucessos := 0
+	var todosErros []string
 
-	jobs := make(chan Livro, len(livros))
-	results := make(chan error, len(livros))
+	for i := 0; i < len(livros); i += chunkSize {
+		end := i + chunkSize
+		if end > len(livros) {
+			end = len(livros)
+		}
 
-	var wg sync.WaitGroup
+		batch := livros[i:end]
 
-	for w := 1; w <= maxWorkers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for livro := range jobs {
-				err := postLivro(livro, token)
-				results <- err // Envia o resultado (nil para sucesso, erro para falha)
+		var payload []map[string]interface{}
+		for _, livro := range batch {
+			p := map[string]interface{}{
+				"nome":        livro.Nome,
+				"autor":       livro.Autor,
+				"quantidade":  livro.Quantidade,
+				"categoriaId": livro.CategoriaID,
+				"descricao":   livro.Descricao,
 			}
-		}()
-	}
+			payload = append(payload, p)
+		}
 
-	// Envia os jobs
-	for _, livro := range livros {
-		jobs <- livro
-	}
-	close(jobs)
+		body, status, err := postRequest(javaLivroEndpoint, token, payload)
 
-	wg.Wait() // Espera todos os workers terminarem
-	close(results)
-
-	// Coleta os resultados
-	sucessos := 0
-	errosSlice := []string{}
-	for err := range results {
 		if err != nil {
-			errosSlice = append(errosSlice, err.Error())
+			todosErros = append(todosErros, fmt.Sprintf("Erro no lote %d-%d: %v", i, end, err))
+			continue
+		}
+
+		if status != http.StatusCreated && status != http.StatusOK {
+			todosErros = append(todosErros, fmt.Sprintf("Erro no lote %d-%d. Status: %d. Resp: %s", i, end, status, string(body)))
 		} else {
-			sucessos++
+			totalSucessos += len(batch)
 		}
 	}
 
-	return sucessos, errosSlice
+	return totalSucessos, todosErros
 }
 
 func processarLivros(filePath, token string) (int, []string) {
