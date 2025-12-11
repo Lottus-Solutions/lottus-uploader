@@ -25,14 +25,14 @@ O sistema opera com base em uma arquitetura de produtor-consumidor, onde este pr
 graph TD
     subgraph "Serviço Externo (Fora deste Projeto)"
         A[API de Upload] -- 1. Recebe arquivo .csv/.xlsx --> B(Armazenamento Temporário);
-        A -- 2. Publica mensagem na fila --> C((fa:fa-database RabbitMQ));
+        A -- 2. Publica mensagem na fila --> C((RabbitMQ));
     end
 
     subgraph "Lottus Uploader (Este Projeto)"
         C -- 3. Mensagem consumida pelo Worker --> D{Worker Go};
         D -- 4. Lê o arquivo do caminho recebido --> E[Processamento de Dados];
         E -- 5. Envia dados em lotes concorrentes --> F[API Backend (Java)];
-        D -- 6. Após sucesso, acknowledge e remove arquivo --> G((fa:fa-check-circle Fim));
+        D -- 6. Após sucesso, acknowledge e remove arquivo --> G((Fim));
     end
 
     style A fill:#f9f,stroke:#333,stroke-width:2px
