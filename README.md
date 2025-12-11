@@ -23,30 +23,12 @@ O sistema opera com base em uma arquitetura de produtor-consumidor, onde este pr
 
 ```mermaid
 graph TD
-    %% Define all nodes first
-    subgraph "Serviço Externo (Fora deste Projeto)"
-        A[API de Upload]
-        B(Armazenamento Temporário)
-        C((RabbitMQ))
-    end
-
-    subgraph "Lottus Uploader (Este Projeto)"
-        D{Worker Go}
-        E[Processamento de Dados]
-        F[API Backend (Java)]
-        G((Fim))
-    end
-
-    %% Link nodes together
-    A -- 1. Recebe arquivo .csv/.xlsx --> B;
-    A -- 2. Publica mensagem na fila --> C;
-    C -- 3. Mensagem consumida pelo Worker --> D;
-    D -- 4. Lê o arquivo do caminho recebido --> E;
-    E -- 5. Envia dados em lotes concorrentes --> F;
-    D -- 6. Após sucesso, acknowledge e remove arquivo --> G;
-
-    %% Apply styling
-    style C fill:#FF6600,stroke:#333,stroke-width:2px;
+    A["API Externa (Upload)"] --> B["Armazenamento Temporário"];
+    A --> C((RabbitMQ));
+    C --> D{"Worker Go (Este Projeto)"};
+    D -- "Lê arquivo" --> E["Processa Dados"];
+    E -- "Envia em lotes" --> F["API Backend (Java)"];
+    D -- "Finaliza e Limpa" --> G((Sucesso));
 ```
 
 1.  Um **serviço externo** (não incluído aqui) recebe o upload de um arquivo (`.csv` ou `.xlsx`).
